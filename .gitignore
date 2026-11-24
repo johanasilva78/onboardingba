@@ -1,0 +1,8 @@
+node_modules/
+.next/
+.aws-sam/
+.env*
+!.env.example
+*.tsbuildinfo
+__pycache__/
+.DS_Store

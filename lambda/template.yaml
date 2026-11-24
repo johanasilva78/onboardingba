@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Servicios de verificación para el piloto de onboarding
+
+Parameters:
+  LivenessThreshold:
+    Type: Number
+    Default: 90
+    MinValue: 1
+    MaxValue: 100
+  FaceMatchThreshold:
+    Type: Number
+    Default: 95
+    MinValue: 1
+    MaxValue: 100
+
+Resources:
+  AccessSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Código del piloto y configuración del proveedor documental opcional
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: accessCode
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  ProofSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Clave privada de la Lambda para vincular el DNI y la prueba de vida
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  VerificationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: Verification
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - textract:DetectDocumentText
+                  - rekognition:CreateFaceLivenessSession
+                  - rekognition:GetFaceLivenessSessionResults
+                  - rekognition:CompareFaces
+                Resource: '*'
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-stream'
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref AccessSecret, !Ref ProofSecret]
+
+  StreamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-stream'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt VerificationRole.Arn
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InicioDePruebaDeVida
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: rekognition:StartFaceLivenessSession
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+
+  Verification:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.13
+      CodeUri: .
+      Handler: handler.handler
+      MemorySize: 256
+      Timeout: 28
+      ReservedConcurrentExecutions: 5
+      Role: !GetAtt VerificationRole.Arn
+      Environment:
+        Variables:
+          ACCESS_SECRET_ARN: !Ref AccessSecret
+          PROOF_SECRET_ARN: !Ref ProofSecret
+          LIVENESS_STREAM_ROLE_ARN: !GetAtt StreamRole.Arn
+          LIVENESS_THRESHOLD: !Ref LivenessThreshold
+          FACE_MATCH_THRESHOLD: !Ref FaceMatchThreshold
+
+Outputs:
+  VerificationFunctionName:
+    Value: !Ref Verification
+  VerificationFunctionArn:
+    Value: !GetAtt Verification.Arn
+  PilotAccessSecretArn:
+    Value: !Ref AccessSecret
