@@ -2,6 +2,8 @@
 
 Experiencia web en español para recorrer la verificación de identidad de una persona con DNI hondureño. Usa Next.js App Router, React 19 y TypeScript en el frontend, y una Lambda en Python en el backend. AWS Amplify Hosting ejecuta el frontend y sus rutas de servidor.
 
+La POC se centra en el DNI físico hondureño del formato introducido en 2021, emitido por el Registro Nacional de las Personas (RNP). El DNI digital queda para una etapa posterior, sujeta a confirmación del banco.
+
 ## Probar la experiencia
 
 Con Node.js 22 o posterior:
@@ -11,7 +13,7 @@ npm ci
 npm run dev
 ```
 
-Abre [localhost:3000](http://localhost:3000). Con `ONBOARDING_FUNCTION_NAME` vacía, todos los pasos funcionan con datos ficticios. La demo no solicita cámara ni imágenes personales.
+Abre [127.0.0.1:3000](http://127.0.0.1:3000). Con `ONBOARDING_FUNCTION_NAME` vacía, puedes cargar dos imágenes ficticias JPG o PNG para probar la selección, el reemplazo y la vista previa. La demo mantiene los archivos en el navegador y muestra datos de ejemplo al simular la lectura. También puedes usar el documento de ejemplo directamente.
 
 ```bash
 npm run typecheck
@@ -25,7 +27,7 @@ Las pruebas de la Lambda usan Python 3.11 o posterior y simulan las respuestas d
 
 | Comprobación | Implementación |
 | --- | --- |
-| Lectura del DNI | Amazon Textract lee el frente y el reverso. El flujo requiere un único número de DNI legible en el frente y muestra el texto reconocido. |
+| Lectura del DNI | Amazon Textract lee el frente y el reverso. Se muestran el número de DNI, los nombres, los apellidos y las fechas de nacimiento y vencimiento que se puedan identificar en el frente. El número debe ser único y legible para continuar. |
 | Prueba de vida | Amazon Rekognition Face Liveness abre una sesión de video con el componente oficial de Amplify. La Lambda consulta el resultado de AWS. Si no se alcanza el umbral, se puede repetir la captura. |
 | Comparación facial | La Lambda coteja el fotograma de la sesión con el retrato del frente del DNI mediante Rekognition CompareFaces. Una coincidencia insuficiente queda pendiente de revisión. |
 | Autenticidad | Un proveedor autorizado puede confirmar el documento. Si no hay proveedor o su respuesta es inconclusa, se indica «Sin verificar». El reconocimiento del texto no confirma la emisión del DNI. |
@@ -50,6 +52,25 @@ La aplicación mantiene las fotos y los resultados en memoria durante la sesión
 3. Asigna a Amplify un [rol SSR Compute de IAM](https://docs.aws.amazon.com/amplify/latest/userguide/amplify-SSR-compute-role.html) con `lambda:InvokeFunction` sobre el ARN exacto de `VerificationFunctionArn`. La interfaz usa HTTPS en Amplify. Para apuntar al mismo servicio desde desarrollo local, puedes configurar las dos variables en `.env.local` y usar credenciales de AWS con el mismo alcance.
 
 4. Usa un navegador con cámara y el código de acceso suministrado desde `PilotAccessSecretArn`. Recorre la lectura, la cámara y el resultado con una identidad de prueba autorizada antes de abrir el piloto a participantes.
+
+## Invocar la extracción del DNI
+
+El punto de entrada es [`handler.handler`](lambda/handler.py) y la función de extracción es `read_document`. La ruta Next.js envía esta misma estructura a la Lambda de forma síncrona:
+
+```json
+{
+  "action": "read",
+  "code": "<accessCode del piloto>",
+  "front": "<JPEG del frente en base64>",
+  "back": "<JPEG del reverso en base64>"
+}
+```
+
+La interfaz convierte JPG o PNG a JPEG antes de enviarlos. Para invocar la Lambda directamente, usa JPEG en base64 sin el prefijo `data:`, con un máximo de 420 000 caracteres por lado. La respuesta exitosa incluye `documentNumber` para mostrar y `numeroIdentidad` como cadena de 13 dígitos sin separadores para integración. Ambos conservan los ceros iniciales.
+
+En `fields`, el anverso aporta `givenNames`, `surnames`, `birthDate`, `expiryDate`, `nationality` y `birthplace`. El reverso aporta `residenceMunicipality` y `residenceDepartment` si las etiquetas son legibles. Los campos ilegibles o ambiguos se devuelven como `null` y las fechas válidas llevan el formato `AAAA-MM-DD`. La respuesta también incluye `lines`, `authenticity` y `proof`.
+
+La clasificación automática del documento y sus caras, la lectura de MRZ, QR y códigos de barras, y las reglas de vencimiento, mayoría de edad y cotejo entre caras quedan como propuestas por validar con el banco.
 
 ## Conectar autenticidad documental
 

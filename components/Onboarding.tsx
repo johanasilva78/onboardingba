@@ -19,6 +19,12 @@ const LivenessCamera = dynamic(() => import("./LivenessCamera"), {
 const steps = ["Inicio", "Documento", "Biometría", "Revisión"];
 const demoResult: VerificationResult = { liveness: "passed", faceMatch: "passed" };
 
+function displayDocumentDate(value?: string | null) {
+  if (!value) return "No se pudo leer";
+  const [year, month, day] = value.split("-");
+  return `${day}/${month}/${year}`;
+}
+
 async function request<T>(input: VerificationRequest): Promise<T> {
   const response = await fetch("/api/verification", {
     method: "POST",
@@ -73,7 +79,7 @@ function PhotoInput({ id, label, image, onChange, disabled }: {
       <label htmlFor={id} className={"upload-box" + (image ? " has-photo" : "")}
         onDragOver={event => event.preventDefault()} onDrop={drop}>
         {image
-          ? <img src={`data:image/jpeg;base64,${image}`} alt={label + " del DNI"} />
+          ? <img src={`data:image/jpeg;base64,${image}`} alt={`Vista previa: ${label}`} />
           : <span className="upload-icon"><Upload size={21} /></span>}
         <strong>{label}</strong>
         <span>{image ? "Cambiar imagen" : "Selecciona una foto JPG o PNG"}</span>
@@ -160,8 +166,12 @@ export function Onboarding({ connected }: { connected: boolean }) {
     });
   }
 
-  async function readDocument() {
+  async function readDocument(useExample = false) {
     await run("Leyendo documento…", async () => {
+      if (!useExample) {
+        if (!front || !back) throw new Error("Carga el frente y el reverso del DNI.");
+        if (front === back) throw new Error("Carga una foto diferente para cada lado del DNI.");
+      }
       setDoc(connected ? await request<DocumentResult>({ action: "read", code, front, back }) : exampleDocument);
     });
   }
@@ -204,10 +214,7 @@ export function Onboarding({ connected }: { connected: boolean }) {
   return <>
     <header className="topbar">
       <div className="topbar-inner">
-        <div className="wordmark" aria-label="Banco Atlántida">
-          <span className="brand-symbol" aria-hidden="true"><i /><i /><i /></span>
-          <span>Banco<strong>Atlántida</strong></span>
-        </div>
+        <img className="wordmark" src="/logo-atlantida-red.svg" alt="Banco Atlántida" width={192} height={50} />
         <button type="button" className="help-button" aria-expanded={help} aria-controls="help-panel"
           onClick={() => setHelp(!help)}><CircleHelp size={19} /> <span>Ayuda</span></button>
       </div>
@@ -246,7 +253,7 @@ export function Onboarding({ connected }: { connected: boolean }) {
             <div><span className="feature-icon"><ShieldCheck size={22} /></span><strong>Comparación facial</strong><p>Contrastaremos tu rostro con la foto del DNI.</p></div>
           </div>
           <div className="welcome-actions">
-            {!connected && <p className="notice"><Info size={18} /> Esta demo usa datos ficticios y no solicita imágenes personales.</p>}
+            {!connected && <p className="notice"><Info size={18} /> Puedes usar imágenes ficticias para probar la carga en esta demo.</p>}
             <label className="consent"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} />
               {connected
                 ? "Autorizo el tratamiento de las fotos del DNI y la transmisión de video a AWS para verificar mi identidad en este piloto."
@@ -268,19 +275,32 @@ export function Onboarding({ connected }: { connected: boolean }) {
         <h1 id="step-title" tabIndex={-1}>Documento de identidad</h1>
         <p className="lede">{connected
           ? "Sube fotos nítidas del frente y del reverso de tu DNI. Mantén todos los bordes visibles y evita los reflejos."
-          : "Carga un DNI ficticio para recorrer la lectura de documento sin usar información personal."}</p>
-        {connected && <div className="photo-grid">
+          : "Carga dos imágenes de prueba para ver la vista previa y simular la lectura. Las fotos se quedan en tu navegador."}</p>
+        <div className="photo-grid">
           <PhotoInput id="front" label="Frente del DNI" image={front} disabled={Boolean(pending)} onChange={file => void choosePhoto("front", file)} />
           <PhotoInput id="back" label="Reverso del DNI" image={back} disabled={Boolean(pending)} onChange={file => void choosePhoto("back", file)} />
-        </div>}
+        </div>
+        {pending === "Preparando imagen…" && <p className="lede" role="status">{pending}</p>}
         {doc && <div className="ocr-result">
-          <div className="ocr-heading"><FileText size={20} /><strong>Datos leídos del documento</strong></div>
-          <dl><dt>Número de DNI</dt><dd>{doc.documentNumber || "No se pudo leer el número con claridad"}</dd></dl>
+          <div className="ocr-heading"><FileText size={20} /><strong>{connected ? "Datos leídos del documento" : "Resultado simulado de la lectura"}</strong></div>
+          <dl>
+            <div><dt>Número de DNI</dt><dd>{doc.documentNumber || "No se pudo leer el número con claridad"}</dd></div>
+            {doc.fields && <>
+              <div><dt>Nombres</dt><dd>{doc.fields.givenNames ?? "No se pudo leer"}</dd></div>
+              <div><dt>Apellidos</dt><dd>{doc.fields.surnames ?? "No se pudo leer"}</dd></div>
+              <div><dt>Fecha de nacimiento</dt><dd>{displayDocumentDate(doc.fields.birthDate)}</dd></div>
+              <div><dt>Fecha de vencimiento</dt><dd>{displayDocumentDate(doc.fields.expiryDate)}</dd></div>
+              {doc.fields.nationality !== undefined && <div><dt>Nacionalidad</dt><dd>{doc.fields.nationality ?? "No se pudo leer"}</dd></div>}
+              {doc.fields.birthplace !== undefined && <div><dt>Lugar de nacimiento</dt><dd>{doc.fields.birthplace ?? "No se pudo leer"}</dd></div>}
+              {doc.fields.residenceMunicipality !== undefined && <div><dt>Municipio de domicilio</dt><dd>{doc.fields.residenceMunicipality ?? "No se pudo leer"}</dd></div>}
+              {doc.fields.residenceDepartment !== undefined && <div><dt>Departamento de domicilio</dt><dd>{doc.fields.residenceDepartment ?? "No se pudo leer"}</dd></div>}
+            </>}
+          </dl>
           {doc.lines.length > 0 && <details><summary>Ver texto reconocido</summary><ul>
             {doc.lines.map((line, index) => <li key={index}>{line}</li>)}
           </ul></details>}
           {connected && doc.proof && <button type="button" className="text-button" disabled={Boolean(pending)}
-            onClick={readDocument}>{pending || "Volver a leer el documento"}</button>}
+            onClick={() => void readDocument()}>{pending || "Volver a leer el documento"}</button>}
           {doc.authenticity === "rejected" && <p className="error" role="alert">El proveedor no pudo validar este documento. Puedes volver a cargar las fotos o cerrar el proceso.</p>}
         </div>}
         {error && <p className="error" role="alert">{error}</p>}
@@ -288,16 +308,18 @@ export function Onboarding({ connected }: { connected: boolean }) {
           <button className="secondary" type="button" disabled={Boolean(pending)} onClick={() => go(0)}>Atrás</button>
           {doc?.documentNumber && doc.authenticity !== "rejected"
             ? <button className="primary" type="button" disabled={Boolean(pending)} onClick={() => go(2)}>Continuar a biometría</button>
-            : <button className="primary" type="button" disabled={Boolean(pending) || (connected && (!front || !back))}
-              onClick={readDocument}>{pending || (connected ? "Leer documento" : "Cargar documento de ejemplo")}</button>}
+            : <button className="primary" type="button" disabled={Boolean(pending) || !front || !back}
+              onClick={() => void readDocument()}>{pending || (connected ? "Leer documento" : "Simular lectura")}</button>}
         </div>
+        {!connected && !doc && <button type="button" className="text-button" disabled={Boolean(pending)}
+          onClick={() => void readDocument(true)}>Usar documento de ejemplo</button>}
       </section>}
 
       {step === 2 && <section className="panel">
         <span className="feature-icon section-icon"><ScanFace size={26} /></span>
         <h1 id="step-title" tabIndex={-1}>Prueba de vida</h1>
         <p className="lede">{connected
-          ? "Mira hacia la cámara y sigue las indicaciones. Compararemos la imagen de la prueba con la foto de tu DNI."
+          ? "Centra tu rostro en el óvalo y sigue el movimiento indicado. Compararemos la captura con la foto de tu DNI."
           : "Simula la prueba de vida y la comparación con la foto del documento de ejemplo."}</p>
         {session ? <div className="camera">
           <LivenessCamera key={session.sessionId} session={session} onFinish={finishLiveness}

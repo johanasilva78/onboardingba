@@ -12,12 +12,13 @@ export default function LivenessCamera({ session, onFinish, onExit }: {
 }) {
   return (
     <ThemeProvider theme={{ name: "atlantida", tokens: { colors: { brand: { primary: {
-      10: { value: "#fff1f2" }, 80: { value: "#bf1026" }, 90: { value: "#9b1020" },
-      100: { value: "#760c18" }
+      10: { value: "#fff1f2" }, 80: { value: "var(--red)" }, 90: { value: "var(--red-dark)" },
+      100: { value: "#680914" }
     } } } } }}>
       <FaceLivenessDetectorCore
         sessionId={session.sessionId}
         region={session.region}
+        disableStartScreen={session.challengeType === "FaceMovementChallenge"}
         config={{ credentialProvider: async () => session.credentials }}
         onAnalysisComplete={onFinish}
         onUserCancel={() => onExit()}

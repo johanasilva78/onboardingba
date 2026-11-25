@@ -9,7 +9,9 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from functools import lru_cache
+from unicodedata import normalize
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -21,6 +23,36 @@ LOG = logging.getLogger(__name__)
 REGION = os.getenv("AWS_REGION", "us-east-1")
 MAX_ENCODED_IMAGE = 420_000
 DNI = re.compile(r"(?<![0-9])([0-9]{4})[ \u00a0‐–-]?([0-9]{4})[ \u00a0‐–-]?([0-9]{5})(?![0-9])")
+DATE = re.compile(r"([0-9]{2})\s*[./‐–-]\s*([0-9]{2})\s*[./‐–-]\s*([0-9]{4})")
+PERSON_NAME = re.compile(r"[^\W\d_]+(?:[ .’'‐–-]+[^\W\d_]+)*")
+FIELD_LABELS = {
+    "givenNames": (r"NOMBRES?|FORENAMES?|GIVEN NAMES?", r"FORENAMES?|GIVEN NAMES?"),
+    "surnames": (r"APELLIDOS?|SURNAMES?|LAST NAMES?", r"SURNAMES?|LAST NAMES?"),
+    "birthDate": (r"(?:FECHA DE )?NACIMIENTO|DATE OF BIRTH", r"DATE OF BIRTH"),
+    "expiryDate": (r"(?:FECHA DE )?(?:VENCIMIENTO|EXPIRACI[ÓO]N)|DATE OF EXPIRY", r"DATE OF EXPIRY"),
+    "nationality": (r"NACIONALIDAD|NATIONALITY", r"NATIONALITY"),
+    "birthplace": (r"LUGAR DE NACIMIENTO|PLACE OF BIRTH", r"PLACE OF BIRTH"),
+    "residenceMunicipality": (r"MUNICIPIO(?: DE DOMICILIO)?|MUNICIPALITY", r"MUNICIPALITY"),
+    "residenceDepartment": (r"DEPARTAMENTO(?: DE DOMICILIO)?|DEPARTMENT", r"DEPARTMENT"),
+}
+FRONT_FIELDS = ("givenNames", "surnames", "birthDate", "expiryDate", "nationality", "birthplace")
+BACK_FIELDS = ("residenceMunicipality", "residenceDepartment")
+ADDRESS_LABEL = re.compile(r"^(?:DOMICILIO(?:\s*/\s*ADDRESS)?|ADDRESS)\s*:?\s*$", re.I)
+DEPARTMENTS = set((
+    "ATLANTIDA", "CHOLUTECA", "COLON", "COMAYAGUA", "COPAN", "CORTES", "EL PARAISO",
+    "FRANCISCO MORAZAN", "GRACIAS A DIOS", "INTIBUCA", "ISLAS DE LA BAHIA", "LA PAZ",
+    "LEMPIRA", "OCOTEPEQUE", "OLANCHO", "SANTA BARBARA", "VALLE", "YORO",
+))
+LABEL_PATTERNS = {
+    field: re.compile(rf"^(?:{label})\b(?:(?:\s*/\s*|\s+)(?:{translation})\b)?\s*[:/]*\s*", re.I)
+    for field, (label, translation) in FIELD_LABELS.items()
+}
+OTHER_LABEL = re.compile(
+    r"^(?:REP[ÚU]BLICA DE HONDURAS|REGISTRO NACIONAL|DOCUMENTO NACIONAL|RNP\b|N[ÚU]MERO DE "
+    r"|ID NUMBER|NACIONALIDAD|NATIONALITY|LUGAR DE NACIMIENTO|PLACE OF BIRTH|FECHA DE EMISI[ÓO]N"
+    r"|DATE OF ISSUE|FIRMA|SIGNATURE)\b",
+    re.I,
+)
 SDK_CONFIG = Config(connect_timeout=2, read_timeout=5, retries={"total_max_attempts": 2})
 
 
@@ -88,18 +120,98 @@ def digest(image):
     return hashlib.sha256(image).hexdigest()
 
 
-def get_lines(textract, image):
+def scan_lines(textract, image):
     response = textract.detect_document_text(Document={"Bytes": image})
     return [
-        block["Text"][:200].strip()
+        (normalize("NFC", block["Text"][:200].strip()), block.get("Geometry", {}).get("BoundingBox"))
         for block in response.get("Blocks", [])
-        if block.get("BlockType") == "LINE" and block.get("Text") and block.get("Confidence", 0) >= 75
+        if block.get("BlockType") == "LINE" and (block.get("Text") or "").strip() and block.get("Confidence", 0) >= 75
     ]
 
 
 def find_dni(lines):
     candidates = {"-".join(match.groups()) for line in lines for match in DNI.finditer(line)}
     return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def next_line_index(lines, index):
+    _, box = lines[index]
+    if not box:
+        return index + 1 if index + 1 < len(lines) else None
+
+    candidates = []
+    for candidate_index, (_, other) in enumerate(lines):
+        if not other:
+            continue
+        vertical = other["Top"] - box["Top"]
+        horizontal = abs(other["Left"] - box["Left"])
+        if box["Height"] * 0.6 <= vertical <= 0.09 and horizontal <= 0.045:
+            candidates.append((vertical, horizontal, candidate_index))
+    return min(candidates)[2] if candidates else None
+
+
+def parse_field(field, value):
+    if field in ("birthDate", "expiryDate"):
+        match = DATE.fullmatch(value)
+        if match:
+            day, month, year = map(int, match.groups())
+            try:
+                return date(year, month, day).isoformat()
+            except ValueError:
+                pass
+        return None
+
+    if OTHER_LABEL.match(value) or any(pattern.match(value) for pattern in LABEL_PATTERNS.values()):
+        return None
+    return value if len(value) <= 100 and PERSON_NAME.fullmatch(value) else None
+
+
+def extract_fields(scan, fields_to_read):
+    fields = {}
+    for field in fields_to_read:
+        pattern = LABEL_PATTERNS[field]
+        candidates = set()
+        for index, (text, _) in enumerate(scan):
+            match = pattern.match(text)
+            if match:
+                raw_value = text[match.end():]
+                if not raw_value:
+                    next_index = next_line_index(scan, index)
+                    raw_value = scan[next_index][0] if next_index is not None else ""
+                value = parse_field(field, raw_value)
+                if value:
+                    candidates.add(value)
+        fields[field] = next(iter(candidates)) if len(candidates) == 1 else None
+    return fields
+
+
+def extract_address(scan):
+    fields = extract_fields(scan, BACK_FIELDS)
+    if any(fields.values()):
+        return fields
+
+    labels = [index for index, (text, _) in enumerate(scan) if ADDRESS_LABEL.fullmatch(text)]
+    if not labels:
+        pairs = set()
+        for index, (text, _) in enumerate(scan):
+            municipality = parse_field("residenceMunicipality", text)
+            next_index = next_line_index(scan, index) if municipality else None
+            if next_index is None:
+                continue
+            department = scan[next_index][0]
+            department_key = normalize("NFKD", department.upper()).encode("ascii", "ignore").decode()
+            if " ".join(department_key.split()) in DEPARTMENTS:
+                pairs.add((municipality, department))
+        if len(pairs) == 1:
+            return dict(zip(BACK_FIELDS, pairs.pop()))
+    elif len(labels) == 1:
+        municipality = next_line_index(scan, labels[0])
+        department = next_line_index(scan, municipality) if municipality is not None else None
+        if department is not None:
+            values = [parse_field(field, scan[index][0]) for field, index in zip(BACK_FIELDS, (municipality, department))]
+            if all(values):
+                return dict(zip(BACK_FIELDS, values))
+    return fields
 
 
 def check_authenticity(access, number, front, back):
@@ -133,10 +245,12 @@ def read_document(event, access, key):
         raise RequestError(400, "Carga una foto diferente para cada lado del DNI.")
     textract = client("textract")
     with ThreadPoolExecutor(max_workers=2) as pool:
-        front_scan = pool.submit(get_lines, textract, front)
-        back_scan = pool.submit(get_lines, textract, back)
-        front_lines = front_scan.result()
-        back_lines = back_scan.result()
+        front_task = pool.submit(scan_lines, textract, front)
+        back_task = pool.submit(scan_lines, textract, back)
+        front_scan = front_task.result()
+        back_scan = back_task.result()
+    front_lines = [line for line, _ in front_scan]
+    back_lines = [line for line, _ in back_scan]
     if not back_lines:
         raise RequestError(422, "No pudimos leer el reverso del DNI. Carga una foto más legible.")
 
@@ -151,6 +265,8 @@ def read_document(event, access, key):
             }, key)
     return {
         "documentNumber": document_number,
+        "numeroIdentidad": document_number.replace("-", "") if document_number else None,
+        "fields": {**extract_fields(front_scan, FRONT_FIELDS), **extract_address(back_scan)},
         "lines": list(dict.fromkeys(front_lines + back_lines))[:35],
         "authenticity": authenticity,
         "proof": proof
@@ -165,10 +281,15 @@ def start_liveness(event, key):
         DurationSeconds=900
     )["Credentials"]
     session = client("rekognition").create_face_liveness_session(
-        ClientRequestToken=str(uuid.uuid4()), Settings={"AuditImagesLimit": 0}
+        ClientRequestToken=str(uuid.uuid4()),
+        Settings={
+            "AuditImagesLimit": 0,
+            "ChallengePreferences": [{"Type": "FaceMovementChallenge"}],
+        },
     )["SessionId"]
     return {
         "sessionId": session,
+        "challengeType": "FaceMovementChallenge",
         "region": REGION,
         "proof": proof_encode({
             "purpose": "liveness", "front": claims["front"], "session": session,
