@@ -41,7 +41,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ op
     return invokeVerification(functionName, { action: "workflowResult", token, workflowId: input.workflowId });
   }
 
-  const response = await invokeVerification(functionName, { action: "workflowStart", token, reference: input.reference });
+  const response = await invokeVerification(functionName, {
+    action: "workflowStart", token, reference: input.reference, numeroIdentidad: input.numeroIdentidad,
+  });
   if (!response.ok) return response;
   const { ticket, ...workflow } = await response.json();
   if (typeof ticket !== "string") return json({ message: "No pudimos generar el enlace." }, 502);

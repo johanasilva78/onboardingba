@@ -186,6 +186,7 @@ export function Onboarding({ connected, workflow = false }: { connected: boolean
         if (!front || !back) throw new Error("Carga el frente y el reverso del DNI.");
         if (front === back) throw new Error("Carga una foto diferente para cada lado del DNI.");
       }
+      if (workflow) setDoc(null);
       setDoc(connected ? await verify<DocumentResult>({ action: "read", code, front, back }) : exampleDocument);
     });
   }

@@ -386,6 +386,10 @@ def integration_result(event, key):
 WORKFLOW_INTERACTIONS = ("authorize", "read", "start", "finish", "complete", "cancel")
 
 
+def expected_dni_binding(value, key):
+    return hmac.new(key.encode(), ("expectedDni:" + value).encode(), "sha256").hexdigest()
+
+
 def load_workflow(workflow_id):
     record = client("dynamodb").get_item(
         TableName=os.environ["ONBOARDING_WORKFLOW_TABLE"],
@@ -421,13 +425,16 @@ def start_workflow(event, key):
     reference = event.get("reference")
     if not isinstance(reference, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", reference):
         raise RequestError(400, "Usa una referencia de solicitud válida.")
+    expected_dni = event.get("numeroIdentidad")
+    if not isinstance(expected_dni, str) or not re.fullmatch(r"[0-9]{13}", expected_dni):
+        raise RequestError(400, "Envía numeroIdentidad como una cadena de 13 dígitos sin separadores.")
     workflow_id = str(uuid.uuid4())
     now = int(time.time())
     launch_expires = now + 1200
     save_workflow({
         "workflowId": {"S": workflow_id}, "reference": {"S": reference},
         "expiresAt": {"N": str(now + 86400)},
-    }, status="pending")
+    }, status="pending", expectedDniBinding=expected_dni_binding(expected_dni, key))
     return {
         "workflowId": workflow_id, "reference": reference, "status": "pending",
         "launchExpiresAt": launch_expires, "ticket": proof_encode({
@@ -444,7 +451,7 @@ def workflow_result(event):
     state = record["status"]["S"]
     response = {
         "workflowId": workflow_id, "reference": record["reference"]["S"],
-        "status": state if state in ("pending", "completed", "cancelled") else "in_progress",
+        "status": state if state in ("pending", "completed", "cancelled", "document_mismatch") else "in_progress",
     }
     if state == "completed":
         response["document"] = json.loads(record["document"]["S"])
@@ -477,7 +484,15 @@ def workflow_interaction(event, access, key):
         return {"ok": True}
     if step == "read":
         document = read_document(event, access, key)
+        expected = record.get("expectedDniBinding", {}).get("S")
+        extracted = document["numeroIdentidad"]
+        if expected and extracted and not hmac.compare_digest(expected, expected_dni_binding(extracted, key)):
+            save_workflow(record, status="document_mismatch", document="", documentBinding="",
+                          captureBinding="", verification="")
+            raise RequestError(422, "El número del DNI cargado no coincide con el registrado por el banco. Revisa el documento e inténtalo de nuevo.")
         fields = {field: document[field] for field in ("documentNumber", "numeroIdentidad", "fields", "authenticity")}
+        if expected:
+            fields["numberMatch"] = "matched" if extracted else "unreadable"
         save_workflow(record, status="document_read", document=json.dumps(fields),
                       documentBinding=document["proof"], captureBinding="", verification="")
         return document

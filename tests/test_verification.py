@@ -252,7 +252,8 @@ class VerificationTests(unittest.TestCase):
 
         table.put_item.side_effect = put
         table.get_item.side_effect = lambda Key, **kwargs: {"Item": deepcopy(records[Key["workflowId"]["S"]])}
-        started = self.call("workflowStart", token=token, reference="request-42")["body"]
+        self.assertEqual(self.call("workflowStart", token=token, reference="request-42")["status"], 400)
+        started = self.call("workflowStart", token=token, reference="request-42", numeroIdentidad="0000000000000")["body"]
         workflow_id, ticket = started["workflowId"], started["ticket"]
 
         def enter(step, **params):
@@ -273,13 +274,21 @@ class VerificationTests(unittest.TestCase):
         result = bank_result()["body"]
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["document"]["numeroIdentidad"], "0000000000000")
+        self.assertEqual(result["document"]["numberMatch"], "matched")
         self.assertEqual(result["verification"], {"liveness": "passed", "faceMatch": "passed", "decision": "review"})
         self.assertEqual(self.call("workflowResult", token=ticket, workflowId=workflow_id)["status"], 403)
         saved = json.dumps(records[workflow_id])
         for excluded in (FRONT, BACK, "lines", "credentials"):
             self.assertNotIn(excluded, saved)
 
-        cancelled = self.call("workflowStart", token=token, reference="request-43")["body"]
+        cancelled = self.call("workflowStart", token=token, reference="request-43", numeroIdentidad="0000000000001")["body"]
+        mismatch = self.call("workflowInteraction", ticket=cancelled["ticket"], step="read", front=FRONT, back=BACK)
+        self.assertEqual(mismatch["status"], 422)
+        mismatch_state = self.call("workflowResult", token=token, workflowId=cancelled["workflowId"])["body"]
+        self.assertEqual(mismatch_state["status"], "document_mismatch")
+        self.assertNotIn("document", mismatch_state)
+        self.assertEqual(self.call("workflowInteraction", ticket=cancelled["ticket"], step="start",
+                                   proof=doc["proof"])["status"], 409)
         self.assertEqual(self.call("workflowInteraction", ticket=cancelled["ticket"], step="cancel")["status"], 200)
         self.assertEqual(self.call("workflowResult", token=token,
                                    workflowId=cancelled["workflowId"])["body"]["status"], "cancelled")
