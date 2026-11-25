@@ -470,12 +470,17 @@ def workflow_interaction(event, access, key):
         return {"ok": True}
     if state in ("completed", "cancelled"):
         raise RequestError(409, "Esta solicitud ya terminó. Vuelve a la app del banco.")
-    if step == "authorize":
-        return {"ok": True}
     if step == "cancel":
         for field in ("document", "verification", "documentBinding", "captureBinding"):
             record.pop(field, None)
         save_workflow(record, status="cancelled")
+        return {"ok": True}
+    expected = record.get("expectedDniBinding", {}).get("S")
+    if not expected:
+        raise RequestError(409, "Esta solicitud no tiene un DNI vinculado. Inicia una nueva desde la app del banco.")
+    if step == "authorize":
+        if state == "pending":
+            save_workflow(record, status="opened")
         return {"ok": True}
     if step == "complete":
         if state != "ready":
@@ -484,21 +489,22 @@ def workflow_interaction(event, access, key):
         return {"ok": True}
     if step == "read":
         document = read_document(event, access, key)
-        expected = record.get("expectedDniBinding", {}).get("S")
         extracted = document["numeroIdentidad"]
-        if expected and extracted and not hmac.compare_digest(expected, expected_dni_binding(extracted, key)):
+        if extracted and not hmac.compare_digest(expected, expected_dni_binding(extracted, key)):
             save_workflow(record, status="document_mismatch", document="", documentBinding="",
                           captureBinding="", verification="")
             raise RequestError(422, "El número del DNI cargado no coincide con el registrado por el banco. Revisa el documento e inténtalo de nuevo.")
         fields = {field: document[field] for field in ("documentNumber", "numeroIdentidad", "fields", "authenticity")}
-        if expected:
-            fields["numberMatch"] = "matched" if extracted else "unreadable"
+        fields["numberMatch"] = "matched" if extracted else "unreadable"
+        document["numberMatch"] = fields["numberMatch"]
         save_workflow(record, status="document_read", document=json.dumps(fields),
                       documentBinding=document["proof"], captureBinding="", verification="")
         return document
     if step == "start":
         if state not in ("document_read", "capturing", "ready") or not record["documentBinding"]["S"] or event.get("proof") != record["documentBinding"]["S"]:
             raise RequestError(409, "Vuelve a leer el DNI antes de iniciar la cámara.")
+        if json.loads(record["document"]["S"]).get("numberMatch") != "matched":
+            raise RequestError(409, "El número del DNI debe coincidir antes de iniciar la cámara.")
         session = start_liveness(event, key)
         save_workflow(record, status="capturing", captureBinding=session["proof"], verification="")
         return session

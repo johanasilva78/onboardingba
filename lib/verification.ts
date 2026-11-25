@@ -14,6 +14,7 @@ export type DocumentFields = {
 export type DocumentResult = {
   documentNumber: string | null;
   numeroIdentidad?: string | null;
+  numberMatch?: "matched" | "unreadable";
   fields?: DocumentFields;
   lines: string[];
   authenticity: Authenticity;

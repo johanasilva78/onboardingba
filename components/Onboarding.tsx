@@ -191,8 +191,11 @@ export function Onboarding({ connected, workflow = false }: { connected: boolean
     });
   }
 
+  const canStartBiometrics = Boolean(doc?.documentNumber && doc.authenticity !== "rejected"
+    && (!workflow || doc.numberMatch === "matched"));
+
   async function startLiveness() {
-    if (!doc) return;
+    if (!doc || !canStartBiometrics) return;
     setResult(null);
     await run(connected ? "Preparando cámara…" : "Ejecutando simulación…", async () => {
       if (connected) {
@@ -339,7 +342,7 @@ export function Onboarding({ connected, workflow = false }: { connected: boolean
         {error && <p className="error" role="alert">{error}</p>}
         <div className="actions">
           <button className="secondary" type="button" disabled={Boolean(pending)} onClick={() => go(0)}>Atrás</button>
-          {doc?.documentNumber && doc.authenticity !== "rejected"
+          {canStartBiometrics
             ? <button className="primary" type="button" disabled={Boolean(pending)} onClick={() => go(2)}>Continuar a biometría</button>
             : <button className="primary" type="button" disabled={Boolean(pending) || !front || !back}
               onClick={() => void readDocument()}>{pending || (connected ? "Leer documento" : "Simular lectura")}</button>}
@@ -366,7 +369,7 @@ export function Onboarding({ connected, workflow = false }: { connected: boolean
         {error && <p className="error" role="alert">{error}</p>}
         {!session && <div className="actions">
           <button className="secondary" type="button" onClick={() => go(1)} disabled={Boolean(pending)}>Atrás</button>
-          <button className="primary" type="button" onClick={startLiveness} disabled={Boolean(pending)}>
+          <button className="primary" type="button" onClick={startLiveness} disabled={Boolean(pending) || !canStartBiometrics}>
             {pending || (connected ? "Activar cámara" : "Simular verificación biométrica")}
           </button>
         </div>}

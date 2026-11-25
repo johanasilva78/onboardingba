@@ -263,8 +263,11 @@ class VerificationTests(unittest.TestCase):
             return self.call("workflowResult", token=token, workflowId=workflow_id)
 
         self.assertEqual(bank_result()["body"]["status"], "pending")
+        self.assertEqual(enter("authorize")["status"], 200)
+        self.assertEqual(bank_result()["body"]["status"], "in_progress")
         self.assertEqual(enter("complete")["status"], 409)
         doc = enter("read", front=FRONT, back=BACK)["body"]
+        self.assertEqual(doc["numberMatch"], "matched")
         capture = enter("start", proof=doc["proof"])["body"]
         self.assertEqual(enter("finish", proof=capture["proof"], front=BACK)["status"], 400)
         self.assertEqual(enter("finish", proof=capture["proof"], front=FRONT)["status"], 200)
@@ -292,3 +295,8 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(self.call("workflowInteraction", ticket=cancelled["ticket"], step="cancel")["status"], 200)
         self.assertEqual(self.call("workflowResult", token=token,
                                    workflowId=cancelled["workflowId"])["body"]["status"], "cancelled")
+
+        legacy = self.call("workflowStart", token=token, reference="legacy", numeroIdentidad="0000000000000")["body"]
+        records[legacy["workflowId"]].pop("expectedDniBinding")
+        self.assertEqual(self.call("workflowInteraction", ticket=legacy["ticket"], step="read", front=FRONT,
+                                   back=BACK)["status"], 409)
