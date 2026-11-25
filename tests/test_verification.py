@@ -218,6 +218,13 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(start["status"], 200)
         self.assertEqual(start["body"]["status"], "awaiting_capture")
         proof = start["body"]["capture"]["proof"]
+        ticket = start["body"]["capture"]["captureTicket"]
+        capture = module.handler({"action": "hostedCapture", "ticket": ticket}, None)
+        self.assertEqual(capture["status"], 200)
+        self.assertEqual(capture["body"]["sessionId"], SESSION)
+        self.assertNotIn("proof", capture["body"])
+        self.assertEqual(module.handler({"action": "hostedCapture", "ticket": proof}, None)["status"], 409)
+        self.assertEqual(self.call("integrationResult", token=token, front=FRONT, proof=ticket)["status"], 409)
         self.assertNotIn("lines", start["body"]["document"])
         self.assertEqual(self.call("finish", front=FRONT, proof=proof)["status"], 409)
         self.assertEqual(self.call("integrationResult", token=token, front=BACK, proof=proof)["status"], 400)

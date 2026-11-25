@@ -20,17 +20,18 @@ export type DocumentResult = {
   proof: string;
 };
 
-export type LivenessSession = {
+export type LivenessCapture = {
   sessionId: string;
   challengeType?: "FaceMovementChallenge";
   region: string;
-  proof: string;
   credentials: {
     accessKeyId: string;
     secretAccessKey: string;
     sessionToken: string;
   };
 };
+
+export type LivenessSession = LivenessCapture & { proof: string };
 
 export type VerificationResult = {
   liveness: "passed" | "retry";

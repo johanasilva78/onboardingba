@@ -86,6 +86,12 @@ Estas rutas usan HTTPS y reciben `Authorization: Bearer <integrationToken>` y `C
 
 Cada imagen admite hasta 420 000 caracteres base64 sin prefijo `data:`. Si el documento se puede procesar, la respuesta incluye `status: "awaiting_capture"`, `document` con los campos extraídos y `capture` con `sessionId`, `region`, `challengeType`, `credentials` y `proof`. El backend entrega a la app el ID, la región, el tipo de prueba y las credenciales temporales de captura. Conserva `proof` y el anverso en su backend. El detector de AWS en la app realiza la captura de video. Si el número no se pudo leer, se devuelve `retry_document`. Si el proveedor rechaza el DNI, se devuelve `rejected_document`.
 
+### Mostrar la captura de Amplify dentro de la app
+
+La respuesta de `start` también incluye `captureUrl`, un enlace temporal a la pantalla de Amplify para la misma sesión. El backend del banco envía solo este enlace a su app y conserva el anverso y `capture.proof` para consultar el resultado. Abre la URL completa, incluido el fragmento que empieza con `#`, como página principal de un WebView con JavaScript y permiso de cámara para el origen de Amplify.
+
+El WebView puede observar la navegación a `/biometria/completada` o `/biometria/cancelada` en el mismo origen. Al recibir `completada`, cierra el WebView y consulta el resultado desde el backend. La ruta de retorno solo señaliza que terminó la captura. Ante cancelación o vencimiento, el backend puede iniciar otra sesión. Para fijar un origen público, configura `ONBOARDING_CAPTURE_ORIGIN` en Amplify antes de desplegar.
+
 ### Consultar el resultado después de la captura
 
 `POST /api/v1/dni-verifications/result`

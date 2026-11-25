@@ -3,10 +3,10 @@
 import { FaceLivenessDetectorCore } from "@aws-amplify/ui-react-liveness";
 import { ThemeProvider } from "@aws-amplify/ui-react";
 import "@aws-amplify/ui-react/styles.css";
-import type { LivenessSession } from "@/lib/verification";
+import type { LivenessCapture } from "@/lib/verification";
 
 export default function LivenessCamera({ session, onFinish, onExit }: {
-  session: LivenessSession;
+  session: LivenessCapture;
   onFinish: () => Promise<void>;
   onExit: (message?: string) => void;
 }) {

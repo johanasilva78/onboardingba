@@ -273,13 +273,22 @@ def read_document(event, access, key):
     }
 
 
-def start_liveness(event, key, integration_authenticity=None):
-    claims = proof_decode(event.get("proof"), "document", key)
+def capture_credentials():
     credentials = client("sts").assume_role(
         RoleArn=os.environ["LIVENESS_STREAM_ROLE_ARN"],
         RoleSessionName="OnboardingLiveness",
         DurationSeconds=900
     )["Credentials"]
+    return {
+        "accessKeyId": credentials["AccessKeyId"],
+        "secretAccessKey": credentials["SecretAccessKey"],
+        "sessionToken": credentials["SessionToken"],
+    }
+
+
+def start_liveness(event, key, integration_authenticity=None):
+    claims = proof_decode(event.get("proof"), "document", key)
+    credentials = capture_credentials()
     session = client("rekognition").create_face_liveness_session(
         ClientRequestToken=str(uuid.uuid4()),
         Settings={
@@ -293,16 +302,27 @@ def start_liveness(event, key, integration_authenticity=None):
     }
     if integration_authenticity is not None:
         session_claims.update(purpose="integrationLiveness", authenticity=integration_authenticity)
-    return {
+    capture = {
         "sessionId": session,
         "challengeType": "FaceMovementChallenge",
         "region": REGION,
         "proof": proof_encode(session_claims, key),
-        "credentials": {
-            "accessKeyId": credentials["AccessKeyId"],
-            "secretAccessKey": credentials["SecretAccessKey"],
-            "sessionToken": credentials["SessionToken"]
-        }
+        "credentials": credentials,
+    }
+    if integration_authenticity is not None:
+        capture["captureTicket"] = proof_encode({
+            "purpose": "hostedCapture", "session": session, "expires": session_claims["expires"],
+        }, key)
+    return capture
+
+
+def hosted_capture(event, key):
+    claims = proof_decode(event.get("ticket"), "hostedCapture", key)
+    return {
+        "sessionId": claims["session"],
+        "challengeType": "FaceMovementChallenge",
+        "region": REGION,
+        "credentials": capture_credentials(),
     }
 
 
@@ -365,6 +385,8 @@ def integration_result(event, key):
 def handler(event, _context):
     try:
         action = event.get("action")
+        if action == "hostedCapture":
+            return {"status": 200, "body": hosted_capture(event, secret("PROOF_SECRET_ARN"))}
         integration = action in ("integrationStart", "integrationResult")
         if not integration and action not in ("authorize", "read", "start", "finish"):
             raise RequestError(400, "Solicitud inválida.")

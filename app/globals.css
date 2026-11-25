@@ -114,6 +114,8 @@ h1:focus { outline: none; }
 .guide-face { color: var(--red-dark); flex-shrink: 0; }
 .camera { margin: 24px auto 0; max-width: 608px; padding: clamp(8px, 2vw, 16px); border: 1px solid var(--line); border-radius: 20px; background: var(--surface); }
 .camera .amplify-liveness-camera-module { overflow: hidden; border-radius: 14px; }
+.hosted-capture { margin-top: clamp(16px, 5vw, 48px); }
+.hosted-capture .wordmark { margin-bottom: 24px; }
 .results { margin-top: 22px; border: 1px solid var(--line); border-radius: 12px; }
 .result-row { display: grid; grid-template-columns: 41px 1fr auto; gap: 12px; align-items: center; padding: 13px; }
 .result-row + .result-row { border-top: 1px solid var(--line); }

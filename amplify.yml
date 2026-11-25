@@ -8,7 +8,7 @@ frontend:
         - npm ci
     build:
       commands:
-        - env | grep -E '^ONBOARDING_(FUNCTION_NAME|REGION)=' > .env.production || true
+        - env | grep -E '^ONBOARDING_(FUNCTION_NAME|REGION|CAPTURE_ORIGIN)=' > .env.production || true
         - npm run build
   artifacts:
     baseDirectory: .next
