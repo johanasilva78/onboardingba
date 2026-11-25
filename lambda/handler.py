@@ -273,7 +273,7 @@ def read_document(event, access, key):
     }
 
 
-def start_liveness(event, key):
+def start_liveness(event, key, integration_authenticity=None):
     claims = proof_decode(event.get("proof"), "document", key)
     credentials = client("sts").assume_role(
         RoleArn=os.environ["LIVENESS_STREAM_ROLE_ARN"],
@@ -287,14 +287,17 @@ def start_liveness(event, key):
             "ChallengePreferences": [{"Type": "FaceMovementChallenge"}],
         },
     )["SessionId"]
+    session_claims = {
+        "purpose": "liveness", "front": claims["front"], "session": session,
+        "expires": int(time.time()) + 180,
+    }
+    if integration_authenticity is not None:
+        session_claims.update(purpose="integrationLiveness", authenticity=integration_authenticity)
     return {
         "sessionId": session,
         "challengeType": "FaceMovementChallenge",
         "region": REGION,
-        "proof": proof_encode({
-            "purpose": "liveness", "front": claims["front"], "session": session,
-            "expires": int(time.time()) + 180
-        }, key),
+        "proof": proof_encode(session_claims, key),
         "credentials": {
             "accessKeyId": credentials["AccessKeyId"],
             "secretAccessKey": credentials["SecretAccessKey"],
@@ -303,13 +306,15 @@ def start_liveness(event, key):
     }
 
 
-def finish_liveness(event, key):
-    claims = proof_decode(event.get("proof"), "liveness", key)
+def finish_liveness(event, key, integration=False):
+    claims = proof_decode(event.get("proof"), "integrationLiveness" if integration else "liveness", key)
     front = image_bytes(event.get("front"))
     if not hmac.compare_digest(claims["front"], digest(front)):
         raise RequestError(400, "La imagen cambió durante la sesión. Vuelve a leer el DNI.")
     rekognition = client("rekognition")
     session = rekognition.get_face_liveness_session_results(SessionId=claims["session"])
+    if integration and session.get("Status") in {"CREATED", "IN_PROGRESS"}:
+        return {"liveness": "pending", "faceMatch": "pending"}
     ref_image = session.get("ReferenceImage", {}).get("Bytes")
     liveness_threshold = float(os.environ.get("LIVENESS_THRESHOLD", "90"))
     if session.get("Status") != "SUCCEEDED" or session.get("Confidence", 0) < liveness_threshold or not ref_image:
@@ -330,13 +335,47 @@ def finish_liveness(event, key):
     return {"liveness": "passed", "faceMatch": "passed" if matches else "review"}
 
 
+def start_integration(event, access, key):
+    document = read_document(event, access, key)
+    proof = document.pop("proof")
+    document.pop("lines")
+    if document["authenticity"] == "rejected":
+        return {"status": "rejected_document", "document": document}
+    if not proof:
+        return {"status": "retry_document", "document": document}
+    session = start_liveness({"proof": proof}, key, document["authenticity"])
+    return {"status": "awaiting_capture", "document": document, "capture": session}
+
+
+def integration_result(event, key):
+    claims = proof_decode(event.get("proof"), "integrationLiveness", key)
+    result = finish_liveness(event, key, integration=True)
+    authenticity = claims["authenticity"]
+    if result["liveness"] == "pending":
+        status = "awaiting_capture"
+    elif result["liveness"] == "retry":
+        status = "retry_capture"
+    elif result["faceMatch"] == "passed" and authenticity == "verified":
+        status = "verified"
+    else:
+        status = "review"
+    return {**result, "authenticity": authenticity, "status": status}
+
+
 def handler(event, _context):
     try:
         action = event.get("action")
-        if action not in ("authorize", "read", "start", "finish"):
+        integration = action in ("integrationStart", "integrationResult")
+        if not integration and action not in ("authorize", "read", "start", "finish"):
             raise RequestError(400, "Solicitud inválida.")
         access = json.loads(secret("ACCESS_SECRET_ARN"))
-        if not code_allowed(event.get("code"), access.get("accessCode")):
+        if integration:
+            token = access.get("integrationToken")
+            if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", token):
+                raise RequestError(503, "La integración bancaria no está habilitada.")
+            if not code_allowed(event.get("token"), token):
+                raise RequestError(403, "El token de integración no es válido.")
+        elif not code_allowed(event.get("code"), access.get("accessCode")):
             raise RequestError(403, "El código de acceso no es válido.")
         if action == "authorize":
             return {"status": 200, "body": {"ok": True}}
@@ -346,6 +385,10 @@ def handler(event, _context):
             result = read_document(event, access, key)
         elif action == "start":
             result = start_liveness(event, key)
+        elif action == "integrationStart":
+            result = start_integration(event, access, key)
+        elif action == "integrationResult":
+            result = integration_result(event, key)
         else:
             result = finish_liveness(event, key)
         return {"status": 200, "body": result}

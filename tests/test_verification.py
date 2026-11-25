@@ -209,3 +209,23 @@ class VerificationTests(unittest.TestCase):
         self.assertIsNone(module.extract_address(scan + [
             ("SIGUATEPEQUE", None), ("COMAYAGUA", None),
         ])["residenceMunicipality"])
+
+    def test_bank_api_binds_the_original_document_and_returns_review(self):
+        token = "A" * 43
+        self.access["integrationToken"] = token
+        self.assertEqual(self.call("integrationStart", token=CODE, front=FRONT, back=BACK)["status"], 403)
+        start = self.call("integrationStart", token=token, front=FRONT, back=BACK)
+        self.assertEqual(start["status"], 200)
+        self.assertEqual(start["body"]["status"], "awaiting_capture")
+        proof = start["body"]["capture"]["proof"]
+        self.assertNotIn("lines", start["body"]["document"])
+        self.assertEqual(self.call("finish", front=FRONT, proof=proof)["status"], 409)
+        self.assertEqual(self.call("integrationResult", token=token, front=BACK, proof=proof)["status"], 400)
+        get_results = self.rekognition.get_face_liveness_session_results
+        get_results.side_effect = [{"Status": "IN_PROGRESS"}, get_results.return_value]
+        pending = self.call("integrationResult", token=token, front=FRONT, proof=proof)
+        self.assertEqual(pending["body"]["status"], "awaiting_capture")
+        result = self.call("integrationResult", token=token, front=FRONT, proof=proof)
+        self.assertEqual(result["body"], {
+            "status": "review", "liveness": "passed", "faceMatch": "passed", "authenticity": "unavailable",
+        })

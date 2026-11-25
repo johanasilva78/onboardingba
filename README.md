@@ -72,6 +72,32 @@ En `fields`, el anverso aporta `givenNames`, `surnames`, `birthDate`, `expiryDat
 
 La clasificación automática del documento y sus caras, la lectura de MRZ, QR y códigos de barras, y las reglas de vencimiento, mayoría de edad y cotejo entre caras quedan como propuestas por validar con el banco.
 
+## API para el backend del banco
+
+Estas rutas usan HTTPS y reciben `Authorization: Bearer <integrationToken>` y `Content-Type: application/json`. Para habilitarlas, agrega `integrationToken` al JSON del secreto `ACCESS_SECRET_ARN`, conservando las claves existentes. Usa un token aleatorio de al menos 32 bytes codificado en base64url sin relleno, por ejemplo con `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`. Custodia el token en el backend del banco.
+
+### Iniciar la verificación
+
+`POST /api/v1/dni-verifications/start`
+
+```json
+{"front":"<JPEG del anverso en base64>","back":"<JPEG del reverso en base64>"}
+```
+
+Cada imagen admite hasta 420 000 caracteres base64 sin prefijo `data:`. Si el documento se puede procesar, la respuesta incluye `status: "awaiting_capture"`, `document` con los campos extraídos y `capture` con `sessionId`, `region`, `challengeType`, `credentials` y `proof`. El backend entrega a la app el ID, la región, el tipo de prueba y las credenciales temporales de captura. Conserva `proof` y el anverso en su backend. El detector de AWS en la app realiza la captura de video. Si el número no se pudo leer, se devuelve `retry_document`. Si el proveedor rechaza el DNI, se devuelve `rejected_document`.
+
+### Consultar el resultado después de la captura
+
+`POST /api/v1/dni-verifications/result`
+
+```json
+{"proof":"<capture.proof>","front":"<mismo JPEG del anverso en base64>"}
+```
+
+El servicio liga el anverso original a la sesión mediante una prueba firmada. El backend debe reenviar exactamente el mismo JPEG, ya que la POC procesa las imágenes en memoria. Consulta dentro de los tres minutos de la creación de la sesión. Si vence y recibes HTTP 409, inicia una sesión nueva.
+
+La respuesta contiene `status`, `liveness`, `faceMatch` y `authenticity`. `status` puede ser `awaiting_capture` mientras se procesa el video, `retry_capture` si se necesita otra sesión, `review` si alguna comprobación requiere revisión o `verified` cuando pasan la prueba de vida y la comparación facial y el proveedor confirma la autenticidad. Sin proveedor de autenticidad, incluso una coincidencia facial exitosa queda en `review`.
+
 ## Conectar autenticidad documental
 
 Configura las propiedades `authenticityUrl` y `authenticityApiKey` en el JSON del secreto `PilotAccessSecretArn`, conservando `accessCode`. La URL debe ser HTTPS y pertenecer a un proveedor autorizado para procesar documentos hondureños.
