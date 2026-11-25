@@ -104,6 +104,17 @@ El servicio liga el anverso original a la sesión mediante una prueba firmada. E
 
 La respuesta contiene `status`, `liveness`, `faceMatch` y `authenticity`. `status` puede ser `awaiting_capture` mientras se procesa el video, `retry_capture` si se necesita otra sesión, `review` si alguna comprobación requiere revisión o `verified` cuando pasan la prueba de vida y la comparación facial y el proveedor confirma la autenticidad. Sin proveedor de autenticidad, incluso una coincidencia facial exitosa queda en `review`.
 
+### Abrir el onboarding completo dentro de la app
+
+Usa estos endpoints con los mismos encabezados de integración cuando el cliente vaya a cargar el DNI dentro de la experiencia.
+
+1. Llama a `POST /api/v1/onboarding/start` con `{"reference":"solicitud-123"}`. Usa una referencia opaca del banco, sin datos personales. Devuelve HTTP 201, `workflowId`, `onboardingUrl` y `launchExpiresAt` (segundos Unix). El enlace dura 20 minutos.
+2. El banco conserva `workflowId` en su backend y abre `onboardingUrl` completo, incluido el fragmento, como página principal de su WebView con JavaScript y permiso de cámara para el origen de Amplify. El cliente ve el consentimiento, carga las dos caras del DNI, hace la prueba de vida y revisa los resultados.
+3. Cuando el WebView navegue a `/onboarding/completado` en el origen de Amplify, ciérralo y llama desde el backend a `POST /api/v1/onboarding/result` con `{"workflowId":"<id recibido>" }`. Para `completed`, la API devuelve `document` con el número, los campos y la autenticidad, además de `verification` con prueba de vida, comparación facial y decisión. Usa el estado autenticado para continuar tu proceso. La navegación es solo una señal. Antes de finalizar, el estado es `pending` o `in_progress`.
+4. Ante `/onboarding/cancelado`, cierra el WebView y gestiona el estado `cancelled` en la app. Si vence el enlace, inicia una solicitud nueva.
+
+La POC guarda los resultados estructurados durante hasta 24 horas, contadas desde el inicio. La API exige la credencial del banco para consultarlos. La tabla de DynamoDB elimina los registros expirados de forma asíncrona y no guarda imágenes, video ni el texto OCR sin procesar. Los endpoints de DNI anteriores siguen disponibles para el caso en que el banco ya tenga las fotos.
+
 ## Conectar autenticidad documental
 
 Configura las propiedades `authenticityUrl` y `authenticityApiKey` en el JSON del secreto `PilotAccessSecretArn`, conservando `accessCode`. La URL debe ser HTTPS y pertenecer a un proveedor autorizado para procesar documentos hondureños.

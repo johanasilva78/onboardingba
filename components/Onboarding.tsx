@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState, type ChangeEvent, type DragEvent, type ReactNode } from "react";
+import { useRef, useState, type ChangeEvent, type DragEvent, type ReactNode } from "react";
 import {
   BadgeCheck, Camera, Check, CircleHelp, Clock3, CreditCard, FileCheck2,
   FileText, Fingerprint, IdCard, Info, LockKeyhole, ScanFace, ShieldCheck, Upload, X
@@ -25,8 +25,8 @@ function displayDocumentDate(value?: string | null) {
   return `${day}/${month}/${year}`;
 }
 
-async function request<T>(input: VerificationRequest): Promise<T> {
-  const response = await fetch("/api/verification", {
+async function request<T>(path: string, input: object): Promise<T> {
+  const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input)
@@ -102,7 +102,7 @@ function ResultRow({ icon, label, detail, status, passed }: {
   </div>;
 }
 
-export function Onboarding({ connected }: { connected: boolean }) {
+export function Onboarding({ connected, workflow = false }: { connected: boolean; workflow?: boolean }) {
   const [step, setStep] = useState(0);
   const [consent, setConsent] = useState(false);
   const [code, setCode] = useState("");
@@ -115,6 +115,20 @@ export function Onboarding({ connected }: { connected: boolean }) {
   const [pending, setPending] = useState("");
   const [help, setHelp] = useState(false);
   const [needsReview, setNeedsReview] = useState(false);
+  const workflowTicket = useRef("");
+
+  async function verify<T>(input: VerificationRequest | { action: "complete" | "cancel" }) {
+    if (!workflow) return request<T>("/api/verification", input);
+    const ticket = workflowTicket.current || new URLSearchParams(window.location.hash.slice(1)).get("ticket");
+    if (!ticket) throw new Error("Abre el enlace de verificación desde la app del banco.");
+    const { action, ...payload } = input;
+    const result = await request<T>("/api/v1/onboarding/interaction", { ...payload, step: action, ticket });
+    if (!workflowTicket.current) {
+      workflowTicket.current = ticket;
+      window.history.replaceState(window.history.state, "", "/onboarding");
+    }
+    return result;
+  }
 
   function go(next: number) {
     setError("");
@@ -159,9 +173,9 @@ export function Onboarding({ connected }: { connected: boolean }) {
   }
 
   async function start() {
-    if (!consent || (connected && !code.trim())) return;
+    if (!consent || (connected && !workflow && !code.trim())) return;
     await run("Comprobando acceso…", async () => {
-      if (connected) await request({ action: "authorize", code });
+      if (connected) await verify({ action: "authorize", code });
       go(1);
     });
   }
@@ -172,7 +186,7 @@ export function Onboarding({ connected }: { connected: boolean }) {
         if (!front || !back) throw new Error("Carga el frente y el reverso del DNI.");
         if (front === back) throw new Error("Carga una foto diferente para cada lado del DNI.");
       }
-      setDoc(connected ? await request<DocumentResult>({ action: "read", code, front, back }) : exampleDocument);
+      setDoc(connected ? await verify<DocumentResult>({ action: "read", code, front, back }) : exampleDocument);
     });
   }
 
@@ -181,7 +195,7 @@ export function Onboarding({ connected }: { connected: boolean }) {
     setResult(null);
     await run(connected ? "Preparando cámara…" : "Ejecutando simulación…", async () => {
       if (connected) {
-        setSession(await request<LivenessSession>({ action: "start", code, proof: doc.proof }));
+        setSession(await verify<LivenessSession>({ action: "start", code, proof: doc.proof }));
       } else {
         setResult(demoResult);
         go(3);
@@ -193,7 +207,7 @@ export function Onboarding({ connected }: { connected: boolean }) {
     if (!session) return;
     setSession(null);
     await run("Consultando resultados…", async () => {
-      const verification = await request<VerificationResult>({ action: "finish", code, front, proof: session.proof });
+      const verification = await verify<VerificationResult>({ action: "finish", code, front, proof: session.proof });
       setResult(verification);
       if (verification.liveness === "passed") go(3);
       else setError("La prueba de vida requiere otro intento. Colócate frente a la cámara con luz uniforme.");
@@ -201,6 +215,13 @@ export function Onboarding({ connected }: { connected: boolean }) {
   }
 
   function finish() {
+    if (workflow) {
+      void run("Entregando resultados…", async () => {
+        await verify({ action: "complete" });
+        window.location.replace("/onboarding/completado");
+      });
+      return;
+    }
     setNeedsReview(result?.faceMatch !== "passed" || doc?.authenticity !== "verified");
     setFront("");
     setBack("");
@@ -209,6 +230,17 @@ export function Onboarding({ connected }: { connected: boolean }) {
     setResult(null);
     setCode("");
     go(4);
+  }
+
+  function exit() {
+    if (!workflow) {
+      restart();
+      return;
+    }
+    void run("Cancelando verificación…", async () => {
+      await verify({ action: "cancel" });
+      window.location.replace("/onboarding/cancelado");
+    });
   }
 
   return <>
@@ -259,11 +291,11 @@ export function Onboarding({ connected }: { connected: boolean }) {
                 ? "Autorizo el tratamiento de las fotos del DNI y la transmisión de video a AWS para verificar mi identidad en este piloto."
                 : "Entiendo que esta es una simulación con datos de ejemplo."}
             </label>
-            {connected && <label className="access-code">Código de acceso
+            {connected && !workflow && <label className="access-code">Código de acceso
               <input type="password" autoComplete="off" maxLength={128} value={code} onChange={event => setCode(event.target.value)} />
             </label>}
             {error && <p className="error" role="alert">{error}</p>}
-            <button className="primary" type="button" onClick={start} disabled={!consent || Boolean(pending) || (connected && !code.trim())}>
+            <button className="primary" type="button" onClick={start} disabled={!consent || Boolean(pending) || (connected && !workflow && !code.trim())}>
               {pending || "Comenzar verificación"}
             </button>
           </div>
@@ -353,9 +385,10 @@ export function Onboarding({ connected }: { connected: boolean }) {
             detail={doc.authenticity === "verified" ? "Confirmada por el proveedor documental" : "Sin confirmación de una fuente de autenticidad"}
             status={doc.authenticity === "verified" ? "Verificada" : "Sin verificar"} passed={doc.authenticity === "verified"} />
         </div>
+        {error && <p className="error" role="alert">{error}</p>}
         <div className="actions">
-          <button className="secondary" type="button" onClick={() => { setResult(null); go(2); }}>Atrás</button>
-          <button className="primary" type="button" onClick={finish}>Finalizar</button>
+          <button className="secondary" type="button" disabled={Boolean(pending)} onClick={() => { setResult(null); go(2); }}>Atrás</button>
+          <button className="primary" type="button" disabled={Boolean(pending)} onClick={finish}>{pending || "Finalizar"}</button>
         </div>
       </section>}
 
@@ -367,7 +400,7 @@ export function Onboarding({ connected }: { connected: boolean }) {
           : "Recorriste la lectura de documento, la prueba de vida y la comparación facial con datos de ejemplo."}</p>
         <button className="primary" type="button" onClick={restart}>Volver al inicio</button>
       </section>}
-      {step > 0 && step < 4 && !session && <button className="exit-button" onClick={restart} type="button" disabled={Boolean(pending)}>Salir de la verificación</button>}
+      {(step > 0 || workflow) && step < 4 && !session && <button className="exit-button" onClick={exit} type="button" disabled={Boolean(pending)}>Salir de la verificación</button>}
     </main>
     <footer className="footer">
       <div><span className="footer-brand">Banco Atlántida</span><span>{connected ? "Piloto de verificación" : "Prototipo de demostración"}</span></div>

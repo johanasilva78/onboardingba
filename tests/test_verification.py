@@ -48,7 +48,7 @@ def text_block(text, left=None, top=None, confidence=97):
 class VerificationTests(unittest.TestCase):
     def setUp(self):
         self.access = {"accessCode": CODE}
-        self.services = {name: Mock() for name in ("textract", "rekognition", "sts")}
+        self.services = {name: Mock() for name in ("textract", "rekognition", "sts", "dynamodb")}
         self.services["textract"].detect_document_text.side_effect = lambda Document: {
             "Blocks": [text_block("0000-0000-00000"), text_block("EJEMPLO")] if
             Document["Bytes"] == base64.b64decode(FRONT) else [text_block("REVERSO")]
@@ -66,7 +66,9 @@ class VerificationTests(unittest.TestCase):
         self.enterContext(patch.object(module, "secret", side_effect=lambda name: (
             json.dumps(self.access) if name == "ACCESS_SECRET_ARN" else KEY
         )))
-        self.enterContext(patch.dict(os.environ, {"LIVENESS_STREAM_ROLE_ARN": "example"}))
+        self.enterContext(patch.dict(os.environ, {
+            "LIVENESS_STREAM_ROLE_ARN": "example", "ONBOARDING_WORKFLOW_TABLE": "test-workflows",
+        }))
 
     def call(self, action, **payload):
         return module.handler({"action": action, "code": CODE, **payload}, None)
@@ -236,3 +238,48 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(result["body"], {
             "status": "review", "liveness": "passed", "faceMatch": "passed", "authenticity": "unavailable",
         })
+
+    def test_bank_workflow_releases_structured_results_after_completion(self):
+        from copy import deepcopy
+
+        token = "A" * 43
+        self.access["integrationToken"] = token
+        records = {}
+        table = self.services["dynamodb"]
+
+        def put(*, Item, **kwargs):
+            records[Item["workflowId"]["S"]] = deepcopy(Item)
+
+        table.put_item.side_effect = put
+        table.get_item.side_effect = lambda Key, **kwargs: {"Item": deepcopy(records[Key["workflowId"]["S"]])}
+        started = self.call("workflowStart", token=token, reference="request-42")["body"]
+        workflow_id, ticket = started["workflowId"], started["ticket"]
+
+        def enter(step, **params):
+            return self.call("workflowInteraction", ticket=ticket, step=step, **params)
+
+        def bank_result():
+            return self.call("workflowResult", token=token, workflowId=workflow_id)
+
+        self.assertEqual(bank_result()["body"]["status"], "pending")
+        self.assertEqual(enter("complete")["status"], 409)
+        doc = enter("read", front=FRONT, back=BACK)["body"]
+        capture = enter("start", proof=doc["proof"])["body"]
+        self.assertEqual(enter("finish", proof=capture["proof"], front=BACK)["status"], 400)
+        self.assertEqual(enter("finish", proof=capture["proof"], front=FRONT)["status"], 200)
+        self.assertNotIn("document", bank_result()["body"])
+        self.assertEqual(enter("complete")["status"], 200)
+        self.assertEqual(enter("complete")["status"], 200)
+        result = bank_result()["body"]
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["document"]["numeroIdentidad"], "0000000000000")
+        self.assertEqual(result["verification"], {"liveness": "passed", "faceMatch": "passed", "decision": "review"})
+        self.assertEqual(self.call("workflowResult", token=ticket, workflowId=workflow_id)["status"], 403)
+        saved = json.dumps(records[workflow_id])
+        for excluded in (FRONT, BACK, "lines", "credentials"):
+            self.assertNotIn(excluded, saved)
+
+        cancelled = self.call("workflowStart", token=token, reference="request-43")["body"]
+        self.assertEqual(self.call("workflowInteraction", ticket=cancelled["ticket"], step="cancel")["status"], 200)
+        self.assertEqual(self.call("workflowResult", token=token,
+                                   workflowId=cancelled["workflowId"])["body"]["status"], "cancelled")

@@ -261,7 +261,8 @@ def read_document(event, access, key):
         authenticity = check_authenticity(access, document_number, event["front"], event["back"])
         if authenticity != "rejected":
             proof = proof_encode({
-                "purpose": "document", "front": digest(front), "expires": int(time.time()) + 900
+                "purpose": "document", "front": digest(front), "expires": int(time.time()) + 900,
+                "nonce": str(uuid.uuid4()),
             }, key)
     return {
         "documentNumber": document_number,
@@ -382,15 +383,133 @@ def integration_result(event, key):
     return {**result, "authenticity": authenticity, "status": status}
 
 
+WORKFLOW_INTERACTIONS = ("authorize", "read", "start", "finish", "complete", "cancel")
+
+
+def load_workflow(workflow_id):
+    record = client("dynamodb").get_item(
+        TableName=os.environ["ONBOARDING_WORKFLOW_TABLE"],
+        Key={"workflowId": {"S": workflow_id}}, ConsistentRead=True,
+    ).get("Item")
+    if not record:
+        raise RequestError(404, "No se encontró la solicitud.")
+    if int(record["expiresAt"]["N"]) <= time.time():
+        raise RequestError(410, "La solicitud caducó.")
+    return record
+
+
+def save_workflow(record, **updates):
+    previous = record.get("revision")
+    entry = {
+        **record,
+        **{field: {"S": value} for field, value in updates.items()},
+        "revision": {"S": str(uuid.uuid4())},
+    }
+    condition = {"ConditionExpression": "attribute_not_exists(workflowId)"} if previous is None else {
+        "ConditionExpression": "revision = :previous",
+        "ExpressionAttributeValues": {":previous": previous},
+    }
+    try:
+        client("dynamodb").put_item(TableName=os.environ["ONBOARDING_WORKFLOW_TABLE"], Item=entry, **condition)
+    except ClientError as error:
+        if error.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise RequestError(409, "La solicitud cambió. Consulta su estado antes de continuar.") from None
+        raise
+
+
+def start_workflow(event, key):
+    reference = event.get("reference")
+    if not isinstance(reference, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", reference):
+        raise RequestError(400, "Usa una referencia de solicitud válida.")
+    workflow_id = str(uuid.uuid4())
+    now = int(time.time())
+    launch_expires = now + 1200
+    save_workflow({
+        "workflowId": {"S": workflow_id}, "reference": {"S": reference},
+        "expiresAt": {"N": str(now + 86400)},
+    }, status="pending")
+    return {
+        "workflowId": workflow_id, "reference": reference, "status": "pending",
+        "launchExpiresAt": launch_expires, "ticket": proof_encode({
+            "purpose": "bankWorkflow", "workflowId": workflow_id, "expires": launch_expires,
+        }, key),
+    }
+
+
+def workflow_result(event):
+    workflow_id = event.get("workflowId")
+    if not isinstance(workflow_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", workflow_id):
+        raise RequestError(400, "Usa un identificador de solicitud válido.")
+    record = load_workflow(workflow_id)
+    state = record["status"]["S"]
+    response = {
+        "workflowId": workflow_id, "reference": record["reference"]["S"],
+        "status": state if state in ("pending", "completed", "cancelled") else "in_progress",
+    }
+    if state == "completed":
+        response["document"] = json.loads(record["document"]["S"])
+        response["verification"] = json.loads(record["verification"]["S"])
+    return response
+
+
+def workflow_interaction(event, access, key):
+    claims = proof_decode(event.get("ticket"), "bankWorkflow", key)
+    record = load_workflow(claims["workflowId"])
+    state = record["status"]["S"]
+    step = event.get("step")
+    if step not in WORKFLOW_INTERACTIONS:
+        raise RequestError(400, "Operación inválida.")
+    if (step == "complete" and state == "completed") or (step == "cancel" and state == "cancelled"):
+        return {"ok": True}
+    if state in ("completed", "cancelled"):
+        raise RequestError(409, "Esta solicitud ya terminó. Vuelve a la app del banco.")
+    if step == "authorize":
+        return {"ok": True}
+    if step == "cancel":
+        for field in ("document", "verification", "documentBinding", "captureBinding"):
+            record.pop(field, None)
+        save_workflow(record, status="cancelled")
+        return {"ok": True}
+    if step == "complete":
+        if state != "ready":
+            raise RequestError(409, "Completa la biometría antes de finalizar.")
+        save_workflow(record, status="completed")
+        return {"ok": True}
+    if step == "read":
+        document = read_document(event, access, key)
+        fields = {field: document[field] for field in ("documentNumber", "numeroIdentidad", "fields", "authenticity")}
+        save_workflow(record, status="document_read", document=json.dumps(fields),
+                      documentBinding=document["proof"], captureBinding="", verification="")
+        return document
+    if step == "start":
+        if state not in ("document_read", "capturing", "ready") or not record["documentBinding"]["S"] or event.get("proof") != record["documentBinding"]["S"]:
+            raise RequestError(409, "Vuelve a leer el DNI antes de iniciar la cámara.")
+        session = start_liveness(event, key)
+        save_workflow(record, status="capturing", captureBinding=session["proof"], verification="")
+        return session
+    if state != "capturing" or event.get("proof") != record["captureBinding"]["S"]:
+        raise RequestError(409, "Inicia una nueva captura desde esta solicitud.")
+    result = finish_liveness(event, key)
+    if result["liveness"] == "passed":
+        authenticity = json.loads(record["document"]["S"])["authenticity"]
+        decision = "verified" if result["faceMatch"] == "passed" and authenticity == "verified" else "review"
+        save_workflow(record, status="ready", verification=json.dumps({**result, "decision": decision}))
+    else:
+        save_workflow(record, status="document_read", captureBinding="")
+    return result
+
+
 def handler(event, _context):
     try:
         action = event.get("action")
         if action == "hostedCapture":
             return {"status": 200, "body": hosted_capture(event, secret("PROOF_SECRET_ARN"))}
-        integration = action in ("integrationStart", "integrationResult")
-        if not integration and action not in ("authorize", "read", "start", "finish"):
+        integration = action in ("integrationStart", "integrationResult", "workflowStart", "workflowResult")
+        if not integration and action not in ("authorize", "read", "start", "finish", "workflowInteraction"):
             raise RequestError(400, "Solicitud inválida.")
         access = json.loads(secret("ACCESS_SECRET_ARN"))
+        if action == "workflowInteraction":
+            return {"status": 200, "body": workflow_interaction(event, access, secret("PROOF_SECRET_ARN"))}
         if integration:
             token = access.get("integrationToken")
             if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", token):
@@ -411,6 +530,10 @@ def handler(event, _context):
             result = start_integration(event, access, key)
         elif action == "integrationResult":
             result = integration_result(event, key)
+        elif action == "workflowStart":
+            result = start_workflow(event, key)
+        elif action == "workflowResult":
+            result = workflow_result(event)
         else:
             result = finish_liveness(event, key)
         return {"status": 200, "body": result}
